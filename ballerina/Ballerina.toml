@@ -17,3 +17,9 @@ groupId = "io.ballerina.lib"
 artifactId = "ai.azure-native"
 version = "1.4.3"
 path = "../native/build/libs/ai.azure-native-1.4.3-SNAPSHOT.jar"
+
+[[dependency]]
+org = "ballerinax"
+name = "azure.openai.chat"
+version = "4.0.0"
+repository = "local"

@@ -273,7 +273,7 @@ isolated function getTheMockLLMResult(string message) returns string {
     return "INVALID";
 }
 
-isolated function getTestServiceResponse(string content) returns chat:CreateChatCompletionResponse =>
+isolated function getTestServiceResponse(string content) returns chat:createChatCompletionResponse =>
     {
     id: "test-id",
     'object: "chat.completion",
@@ -281,7 +281,13 @@ isolated function getTestServiceResponse(string content) returns chat:CreateChat
     model: "gpt-4o",
     choices: [
         {
+            finish_reason: "tool_calls",
+            index: 0,
+            logprobs: (),
             message: {
+                role: "assistant",
+                refusal: (),
+                content: (),
                 tool_calls: [
                     {
                         id: "tool-call-id",
@@ -363,13 +369,15 @@ isolated function getExpectedContentParts(string message) returns (map<anydata>)
             {
                 "type": "image_url",
                 "image_url": {
-                    "url": string `data:image/png;base64,${sampleBinaryStr}`
+                    "url": string `data:image/png;base64,${sampleBinaryStr}`,
+                    "detail": "auto"
                 }
             },
             {
                 "type": "image_url",
                 "image_url": {
-                    "url": sampleImageUrl
+                    "url": sampleImageUrl,
+                    "detail": "auto"
                 }
             },
             {"type": "text", "text": "."}
@@ -382,7 +390,8 @@ isolated function getExpectedContentParts(string message) returns (map<anydata>)
             {
                 "type": "image_url",
                 "image_url": {
-                    "url": string `data:image/png;base64,${sampleBinaryStr}`
+                    "url": string `data:image/png;base64,${sampleBinaryStr}`,
+                    "detail": "auto"
                 }
             },
             {
@@ -399,7 +408,8 @@ isolated function getExpectedContentParts(string message) returns (map<anydata>)
             {
                 "type": "image_url",
                 "image_url": {
-                    "url": string `data:image/png;base64,${sampleBinaryStr}`
+                    "url": string `data:image/png;base64,${sampleBinaryStr}`,
+                    "detail": "auto"
                 }
             },
             {
@@ -415,7 +425,8 @@ isolated function getExpectedContentParts(string message) returns (map<anydata>)
             {
                 "type": "image_url",
                 "image_url": {
-                    "url": string `data:image/*;base64,${sampleBinaryStr}`
+                    "url": string `data:image/*;base64,${sampleBinaryStr}`,
+                    "detail": "auto"
                 }
             },
             {"type": "text", "text": "."}
@@ -428,7 +439,8 @@ isolated function getExpectedContentParts(string message) returns (map<anydata>)
             {
                 "type": "image_url",
                 "image_url": {
-                    "url": sampleImageUrl
+                    "url": sampleImageUrl,
+                    "detail": "auto"
                 }
             },
             {"type": "text", "text": "."}

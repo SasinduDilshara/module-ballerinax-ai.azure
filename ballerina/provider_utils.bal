@@ -99,15 +99,15 @@ isolated function getExpectedResponseSchema(typedesc<anydata> expectedResponseTy
     return generateJsonObjectSchema(check generateJsonSchemaForTypedescAsJson(td));
 }
 
-isolated function getGetResultsToolChoice() returns chat:ChatCompletionNamedToolChoice => {
+isolated function getGetResultsToolChoice() returns chat:chatCompletionNamedToolChoice => {
     'type: FUNCTION,
     'function: {
         name: GET_RESULTS_TOOL
     }
 };
 
-isolated function getGetResultsTool(map<json> parameters) returns chat:ChatCompletionTool[]|ai:Error {
-    chat:ChatCompletionFunctionParameters|error toolParam = parameters.ensureType();
+isolated function getGetResultsTool(map<json> parameters) returns chat:chatCompletionTool[]|ai:Error {
+    chat:FunctionParameters|error toolParam = parameters.ensureType();
     if toolParam is error {
         return error("Error in generated schema: " + toolParam.message());
     }
@@ -237,16 +237,34 @@ isolated function handleParseResponseError(error chatResponseError) returns erro
     return chatResponseError;
 }
 
+# Maps an error returned by the Azure OpenAI chat completions client into an `ai:LlmConnectionError`,
+# surfacing the underlying service error message and response body so that parameter rejections
+# (for example, an unsupported `temperature` or token limit on a GPT-5/o-series deployment) are
+# reported to the caller instead of being hidden behind a generic message.
+#
+# + e - The error returned by the underlying chat completions client
+# + return - An `ai:LlmConnectionError` describing the failure
+isolated function getModelConnectionError(error e) returns ai:Error {
+    var body = e.detail()["body"];
+    if body is anydata && body != () {
+        return error ai:LlmConnectionError(
+            string `Error while connecting to the model: ${e.message()}. ${body.toString()}`, e);
+    }
+    return error ai:LlmConnectionError(string `Error while connecting to the model: ${e.message()}`, e);
+}
+
 isolated function generateLlmResponse(chat:Client llmClient, string deploymentId,
-        string apiVersion, decimal temperature, int maxTokens, ai:Prompt prompt,
+        string apiVersion, decimal? temperature, int maxTokens, ai:Prompt prompt,
         typedesc<json> expectedResponseTypedesc) returns anydata|ai:Error {
     observe:GenerateContentSpan span = observe:createGenerateContentSpan(deploymentId);
-    span.addTemperature(temperature);
+    if temperature is decimal {
+        span.addTemperature(temperature);
+    }
     span.addProvider("azure.ai.openai");
-    
+
     DocumentContentPart[] content;
     ResponseSchema responseSchema;
-    chat:ChatCompletionTool[] tools;
+    chat:chatCompletionTool[] tools;
     do {
         content = check generateChatCreationContent(prompt);
         responseSchema = check getExpectedResponseSchema(expectedResponseTypedesc);
@@ -256,27 +274,44 @@ isolated function generateLlmResponse(chat:Client llmClient, string deploymentId
         return err;
     }
 
-    chat:CreateChatCompletionRequest request = {
-        messages: [
-            {
-                role: ai:USER,
-                "content": content
-            }
-        ],
-        tools,
-        temperature,
-        max_tokens: maxTokens,
-        tool_choice: getGetResultsToolChoice()
-    };
-    span.addInputMessages(request.messages.toJson());
-
-    chat:CreateChatCompletionResponse|error response =
-        llmClient->/deployments/[deploymentId]/chat/completions.post(apiVersion, request);
-    if response is error {
-        ai:Error err = error("LLM call failed: " + response.message(), cause = response.cause(), detail = response.detail());
+    chat:chatCompletionRequestUserMessageContentPart[]|error messageContent = content.cloneWithType();
+    if messageContent is error {
+        ai:Error err = error("Failed to construct the chat message content", messageContent);
         span.close(err);
         return err;
     }
+    chat:chatCompletionRequestUserMessage userMessage = {
+        role: ai:USER,
+        content: messageContent
+    };
+    chat:createChatCompletionRequest request = {
+        messages: [userMessage],
+        tools,
+        max_completion_tokens: maxTokens,
+        tool_choice: getGetResultsToolChoice()
+    };
+    // Reasoning models such as the GPT-5 and o-series deployments only accept the default
+    // sampling `temperature`; the caller controls whether one is sent (set it to `()` for those
+    // deployments). Other deployments keep the configured value, preserving the existing behaviour.
+    if temperature is decimal {
+        request.temperature = temperature;
+    }
+    span.addInputMessages(request.messages.toJson());
+
+    chat:inline_response_200|error rawResponse =
+        llmClient->/deployments/[deploymentId]/chat/completions.post(request, api\-version = apiVersion);
+    if rawResponse is error {
+        ai:Error err = getModelConnectionError(rawResponse);
+        span.close(err);
+        return err;
+    }
+    if rawResponse !is chat:createChatCompletionResponse {
+        ai:Error err = error ai:LlmInvalidResponseError(
+            "Unexpected streaming response received from the model for a non-streaming request");
+        span.close(err);
+        return err;
+    }
+    chat:createChatCompletionResponse response = rawResponse;
 
     string? responseId = response.id;
     if responseId is string {
@@ -303,12 +338,12 @@ isolated function generateLlmResponse(chat:Client llmClient, string deploymentId
     return result;
 }
 
-isolated function ensureAnydataResult(chat:CreateChatCompletionResponse response,
+isolated function ensureAnydataResult(chat:createChatCompletionResponse response,
         typedesc<json> expectedResponseTypedesc, boolean isOriginallyJsonObject,
         observe:GenerateContentSpan span) returns anydata|ai:Error {
     record {
-        chat:ChatCompletionResponseMessage message?;
-        chat:ContentFilterChoiceResults content_filter_results?;
+        chat:chatCompletionResponseMessage message?;
+        chat:contentFilterChoiceResults content_filter_results?;
         int index?;
         string finish_reason?;
     }[]? choices = response.choices;
@@ -317,8 +352,8 @@ isolated function ensureAnydataResult(chat:CreateChatCompletionResponse response
         return error("No completion choices");
     }
 
-    chat:ChatCompletionResponseMessage? message = choices[0].message;
-    chat:ChatCompletionMessageToolCall[]? toolCalls = message?.tool_calls;
+    chat:chatCompletionResponseMessage? message = choices[0].message;
+    chat:chatCompletionMessageToolCall[]? toolCalls = message?.tool_calls;
     if toolCalls is () || toolCalls.length() == 0 {
         return error(NO_RELEVANT_RESPONSE_FROM_THE_LLM);
     }
@@ -327,7 +362,7 @@ isolated function ensureAnydataResult(chat:CreateChatCompletionResponse response
         span.addFinishReason(finishReason);
     }
 
-    chat:ChatCompletionMessageToolCall tool = toolCalls[0];
+    chat:chatCompletionMessageToolCall tool = toolCalls[0];
     map<json>|error arguments = tool.'function.arguments.fromJsonStringWithType();
     if arguments is error {
         return error(NO_RELEVANT_RESPONSE_FROM_THE_LLM);

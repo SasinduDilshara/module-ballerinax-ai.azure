@@ -24,6 +24,16 @@ const API_KEY = "not-a-real-api-key";
 const ERROR_MESSAGE = "Error occurred while attempting to parse the response from the LLM as the expected type. Retrying and/or validating the prompt could fix the response.";
 const RUNTIME_SCHEMA_NOT_SUPPORTED_ERROR_MESSAGE = "Runtime schema generation is not yet supported";
 
+// Constants used by the GPT-5 (reasoning model) tests.
+const REASONING_API_VERSION = "2024-12-01-preview";
+// The default sampling temperature defined by the chat client. This is the only temperature value
+// accepted by GPT-5/o-series reasoning deployments, and is what is sent when the connector is
+// configured with `temperature = ()`.
+const decimal DEFAULT_REASONING_TEMPERATURE = 1;
+const REASONING_MODEL_CHAT_RESPONSE = "Hello from the GPT-5 reasoning model!";
+const PARAMETER_REJECTION_MESSAGE = "Unsupported value: 'temperature' does not support 0.7 with this model. " +
+    "Only the default (1) value is supported.";
+
 final OpenAiModelProvider openAiProvider = check new (SERVICE_URL, API_KEY, DEPLOYMENT_ID, API_VERSION);
 
 string apiKey = "mock-api-key";
@@ -382,4 +392,48 @@ function testGenerateMethodWithTextChunk() returns error? {
     ReviewArray result = check openAiProvider->generate(`How would you rate these text chunks out of ${maxScore}. ${chunks}. Thank you!`);
     Review r = check review.fromJsonStringWithType();
     test:assertEquals(result, [r, r]);
+}
+
+// ==== GPT-5 (reasoning model) support tests ====
+
+// Verifies that, for a GPT-5/reasoning deployment configured without a temperature override
+// (`temperature = ()`), the `generate` path omits the `temperature` field and sends the token
+// limit via `max_completion_tokens`, while still producing the expected result.
+@test:Config
+function testGenerateMethodWithReasoningModelOmitsTemperature() returns error? {
+    OpenAiModelProvider reasoningProvider =
+        check new (SERVICE_URL, API_KEY, "gpt5mini", REASONING_API_VERSION, temperature = ());
+    int rating = check reasoningProvider->generate(`Rate this blog out of 10.
+        Title: ${blog1.title}
+        Content: ${blog1.content}`);
+    test:assertEquals(rating, 4);
+}
+
+// Verifies that the `chat` path omits the `temperature` for a reasoning deployment configured with
+// `temperature = ()` and sends the token limit via `max_completion_tokens`.
+@test:Config
+function testChatWithReasoningModelOmitsTemperature() returns error? {
+    OpenAiModelProvider reasoningProvider =
+        check new (SERVICE_URL, API_KEY, "gpt5chat", REASONING_API_VERSION, temperature = ());
+    ai:ChatAssistantMessage result = check reasoningProvider->chat([{role: ai:USER, content: "Hi"}], []);
+    test:assertEquals(result.content, REASONING_MODEL_CHAT_RESPONSE);
+}
+
+// Verifies that when the model rejects a request parameter (for example, a non-default temperature
+// supplied to a GPT-5 reasoning deployment), the connector surfaces the underlying error message
+// to the caller rather than hiding it behind a generic message.
+@test:Config
+function testGenerateSurfacesModelParameterRejectionError() {
+    OpenAiModelProvider erroringProvider =
+        checkpanic new (SERVICE_URL, API_KEY, "gpt5error", REASONING_API_VERSION);
+    int|ai:Error rating = erroringProvider->generate(`Rate this blog out of 10.
+        Title: ${blog1.title}
+        Content: ${blog1.content}`);
+    if rating !is ai:Error {
+        test:assertFail("Expected an error from the model for the rejected parameter");
+    }
+    test:assertTrue(rating is ai:LlmConnectionError,
+            string `Expected an 'ai:LlmConnectionError' but found: ${rating.message()}`);
+    test:assertTrue(rating.message().includes(PARAMETER_REJECTION_MESSAGE),
+            string `The model error message was not surfaced to the caller: ${rating.message()}`);
 }
