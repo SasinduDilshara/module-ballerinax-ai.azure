@@ -769,3 +769,139 @@ function testLegacyServiceUrlWithoutApiVersionFails() returns error? {
             "unexpected error message: " + (<ai:Error>provider).message());
 }
 
+
+// ===== Parallel (multiple) tool calls =====
+// Azure may return several tool calls in a single assistant turn. The provider must surface all of them as
+// `ai:FunctionCall` entries, and must reconstruct them faithfully when the turn is replayed as history. Both
+// halves are covered on all four routes (Chat Completions and Responses, each over legacy and v1 GA), because the
+// two API surfaces use different wire shapes for the same capability.
+
+final ai:ChatCompletionFunctions[] weatherTools = [
+    {
+        name: "getWeather",
+        description: "Get the current weather for a city",
+        parameters: {
+            "type": "object",
+            "properties": {
+                "city": {"type": "string"}
+            },
+            "required": ["city"]
+        }
+    }
+];
+
+// The trigger marker must lead the user content so the mocks can route this flow; it travels with the history, so
+// the follow-up turn is recognised too.
+final string parallelToolsPrompt = TRIGGER_PARALLEL_TOOLS + " Get weather for Paris and Tokyo";
+
+// The assistant turn returned by the first call, replayed as history along with one result per tool call.
+function buildParallelToolCallHistory() returns ai:ChatMessage[] => [
+    <ai:ChatUserMessage>{role: ai:USER, content: parallelToolsPrompt},
+    <ai:ChatAssistantMessage>{
+        role: ai:ASSISTANT,
+        content: (),
+        toolCalls: [
+            {name: "getWeather", arguments: {"city": "Paris"}, id: PARIS_CALL_ID},
+            {name: "getWeather", arguments: {"city": "Tokyo"}, id: TOKYO_CALL_ID}
+        ]
+    },
+    <ai:ChatFunctionMessage>{role: "function", name: "getWeather", content: "Sunny, 25°C", id: PARIS_CALL_ID},
+    <ai:ChatFunctionMessage>{role: "function", name: "getWeather", content: "Rainy, 18°C", id: TOKYO_CALL_ID}
+];
+
+// Asserts that both parallel tool calls survived the response conversion, in order and with their ids intact.
+function assertParallelToolCalls(ai:ChatAssistantMessage response) {
+    ai:FunctionCall[]? toolCalls = response.toolCalls;
+    test:assertTrue(toolCalls is ai:FunctionCall[], "Expected tool calls in the response");
+    ai:FunctionCall[] calls = <ai:FunctionCall[]>toolCalls;
+    test:assertEquals(calls.length(), 2, "Expected 2 parallel tool calls");
+    test:assertEquals(calls[0].name, "getWeather");
+    test:assertEquals(calls[0].arguments, {"city": "Paris"});
+    test:assertEquals(calls[0].id, PARIS_CALL_ID);
+    test:assertEquals(calls[1].name, "getWeather");
+    test:assertEquals(calls[1].arguments, {"city": "Tokyo"});
+    test:assertEquals(calls[1].id, TOKYO_CALL_ID);
+}
+
+// ----- Chat Completions: legacy surface -----
+
+@test:Config {}
+function testParallelToolCallsInResponse() returns error? {
+    ai:ChatUserMessage userMsg = {role: ai:USER, content: parallelToolsPrompt};
+    ai:ChatAssistantMessage response = check chatCompletionProvider->chat(userMsg, weatherTools);
+    assertParallelToolCalls(response);
+}
+
+@test:Config {}
+function testParallelToolCallsHistoryReconstruction() returns error? {
+    ai:ChatAssistantMessage response =
+        check chatCompletionProvider->chat(buildParallelToolCallHistory(), weatherTools);
+    test:assertEquals(response.content, PARALLEL_TOOLS_ANSWER);
+}
+
+// ----- Chat Completions: v1 GA surface -----
+
+@test:Config {}
+function testParallelToolCallsInResponseV1() returns error? {
+    ai:ChatUserMessage userMsg = {role: ai:USER, content: parallelToolsPrompt};
+    ai:ChatAssistantMessage response = check chatCompletionV1Provider->chat(userMsg, weatherTools);
+    assertParallelToolCalls(response);
+}
+
+@test:Config {}
+function testParallelToolCallsHistoryReconstructionV1() returns error? {
+    ai:ChatAssistantMessage response =
+        check chatCompletionV1Provider->chat(buildParallelToolCallHistory(), weatherTools);
+    test:assertEquals(response.content, PARALLEL_TOOLS_ANSWER);
+}
+
+// ----- Responses API: legacy surface -----
+
+@test:Config {}
+function testResponsesParallelToolCallsInResponse() returns error? {
+    ai:ChatUserMessage userMsg = {role: ai:USER, content: parallelToolsPrompt};
+    ai:ChatAssistantMessage response = check responsesProvider->chat(userMsg, weatherTools);
+    assertParallelToolCalls(response);
+}
+
+@test:Config {}
+function testResponsesParallelToolCallsHistoryReconstruction() returns error? {
+    ai:ChatAssistantMessage response =
+        check responsesProvider->chat(buildParallelToolCallHistory(), weatherTools);
+    test:assertEquals(response.content, PARALLEL_TOOLS_ANSWER);
+}
+
+// ----- Responses API: v1 GA surface -----
+
+@test:Config {}
+function testResponsesParallelToolCallsInResponseV1() returns error? {
+    ai:ChatUserMessage userMsg = {role: ai:USER, content: parallelToolsPrompt};
+    ai:ChatAssistantMessage response = check responsesV1Provider->chat(userMsg, weatherTools);
+    assertParallelToolCalls(response);
+}
+
+@test:Config {}
+function testResponsesParallelToolCallsHistoryReconstructionV1() returns error? {
+    ai:ChatAssistantMessage response =
+        check responsesV1Provider->chat(buildParallelToolCallHistory(), weatherTools);
+    test:assertEquals(response.content, PARALLEL_TOOLS_ANSWER);
+}
+
+// ===== generate() with ai:TextChunk insertions =====
+// `ai:Chunk` insertions must be handled alongside `ai:Document` when building the request content.
+
+@test:Config
+function testGenerateMethodWithTextChunk() returns error? {
+    ai:TextChunk chunk = {
+        content: string `Title: ${blog1.title} Content: ${blog1.content}`
+    };
+    ai:TextChunk[] chunks = [chunk, chunk];
+    int maxScore = 10;
+
+    int rating = check openAiProvider->generate(`How would you rate this text chunk content out of ${maxScore}. ${chunk}.`);
+    test:assertEquals(rating, 4);
+
+    ReviewArray result = check openAiProvider->generate(`How would you rate these text chunks out of ${maxScore}. ${chunks}. Thank you!`);
+    Review r = check review.fromJsonStringWithType();
+    test:assertEquals(result, [r, r]);
+}

@@ -47,6 +47,14 @@ isolated function getExpectedParameterSchema(string message) returns map<json> {
         return expectedParameterSchemaStringForRateBlog2;
     }
 
+    if message.startsWith("How would you rate these text chunks") {
+        return expectedParameterSchemaStringForRateBlog5;
+    }
+
+    if message.startsWith("How would you rate this text chunk") {
+        return expectedParameterSchemaStringForRateBlog;
+    }
+
     if message.startsWith("How would you rate this") {
         return expectedParameterSchemaStringForRateBlog;
     }
@@ -120,7 +128,7 @@ isolated function getExpectedParameterSchema(string message) returns map<json> {
     }
 
     if message.startsWith("Give me a random joke") {
-        return {"type":"object","properties":{"result":{"anyOf":[{"type":"string"},{"type":"null"}]}}};
+        return {"type": "object", "properties": {"result": {"anyOf": [{"type": "string"}, {"type": "null"}]}}};
     }
 
     if message.startsWith("Name a random world class cricketer in India") {
@@ -190,6 +198,14 @@ isolated function getTheMockLLMResult(string message) returns string {
 
     if message.startsWith("How would you rate this text blog") {
         return review;
+    }
+
+    if message.startsWith("How would you rate these text chunks") {
+        return string `{"result": [${review}, ${review}]}`;
+    }
+
+    if message.startsWith("How would you rate this text chunk") {
+        return {result: 4}.toJsonString();
     }
 
     if message.startsWith("How would you rate this") {
@@ -321,6 +337,14 @@ isolated function getExpectedContentParts(string message) returns (map<anydata>)
 
     if message.startsWith("How would you rate this text blog") {
         return expectedContentPartsForRateBlog8;
+    }
+
+    if message.startsWith("How would you rate these text chunks") {
+        return expectedContentPartsForTextChunkArray;
+    }
+
+    if message.startsWith("How would you rate this text chunk") {
+        return expectedContentPartsForTextChunk;
     }
 
     if message.startsWith("How would you rate this") {

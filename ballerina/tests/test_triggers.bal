@@ -51,5 +51,12 @@ const TRIGGER_GEN_EMPTY_CHOICES = "TRIGGER_GEN_EMPTY_CHOICES";
 // arguments-to-map conversion failure branch of the chat() output converter).
 const TRIGGER_ARGS_NOT_OBJECT = "TRIGGER_ARGS_NOT_OBJECT";
 
+// ===== Parallel (multiple) tool call trigger =====
+// Drives the two-turn parallel tool call flow on BOTH the Chat Completions and the Responses mocks. The first turn
+// (no tool results present in the request) returns two `getWeather` calls; the follow-up turn is identified by the
+// reconstructed tool results in the request, where the mock asserts the history wire shape and returns a text
+// answer. Because the marker travels in the user message, it is still present on the follow-up turn.
+const TRIGGER_PARALLEL_TOOLS = "TRIGGER_PARALLEL_TOOLS";
+
 // ===== Embeddings trigger =====
 const EMPTY_EMBED_TRIGGER = "EMPTY_EMBED_TRIGGER";

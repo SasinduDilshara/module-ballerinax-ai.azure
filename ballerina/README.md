@@ -1,6 +1,22 @@
 ## Overview
 
-This module offers APIs for connecting with Azure OpenAI Large Language Models (LLM).
+Azure OpenAI Service provides access to OpenAI's powerful language models within the Microsoft Azure platform.
+
+This module offers APIs for connecting with Azure OpenAI Large Language Models (LLMs), enabling the integration of
+advanced conversational AI, text generation, and language processing capabilities into applications.
+
+### Key Features
+
+- Connect and interact with Azure OpenAI Large Language Models (LLMs)
+- Support for the GPT-5 series, GPT-4 series, GPT-3.5, and other advanced OpenAI models
+- Both the **Chat Completions API** and the **Responses API**, over both the **v1 GA** and **legacy** surfaces
+- Parallel (multiple) tool calls in a single assistant turn, on both API surfaces
+- Reasoning-effort control for reasoning models (`gpt-5`/`o`-series)
+- Text embeddings through a dedicated `EmbeddingProvider`, over both the v1 GA and legacy surfaces
+- Seamless integration with Azure AI infrastructure
+- Secure communication with API key and token authentication
+
+### Model providers
 
 It provides a single chat-model provider class, `OpenAiModelProvider`, which implements `ai:ModelProvider`. The
 provider can target either the Azure OpenAI **Chat Completions API** (the default) or the **Responses API**,
@@ -34,6 +50,12 @@ final ai:EmbeddingProvider legacyEmbeddingProvider = check new azure:EmbeddingPr
 final ai:EmbeddingProvider embeddingProvider = check new azure:EmbeddingProvider(
     "https://<resource>.openai.azure.com/openai/v1", "api-key", (), "deployment-id");
 ```
+
+### Tool calling
+
+Both API surfaces support **parallel tool calls**: a single assistant turn may return several `ai:FunctionCall`
+entries in `ai:ChatAssistantMessage.toolCalls`. When such a turn is sent back as history, each call is correlated
+with its result through the tool call `id`, so an `ai:ChatFunctionMessage` per call must carry the matching `id`.
 
 ## Prerequisites
 

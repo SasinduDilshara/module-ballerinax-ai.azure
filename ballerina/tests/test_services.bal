@@ -39,6 +39,13 @@ const int CUSTOM_MAX_TOKENS = 1234;
 // The reasoning-effort values accepted by the Azure OpenAI specification.
 final readonly & string[] VALID_REASONING_EFFORTS = ["none", "minimal", "low", "medium", "high", "xhigh"];
 
+// Parallel (multiple) tool call fixtures. The two `getWeather` calls are correlated with their results through
+// these ids on both the Chat Completions and the Responses surfaces.
+const PARALLEL_TOOL_NAME = "getWeather";
+const PARIS_CALL_ID = "call_paris_id";
+const TOKYO_CALL_ID = "call_tokyo_id";
+const PARALLEL_TOOLS_ANSWER = "Paris is sunny at 25°C and Tokyo is rainy at 18°C.";
+
 // ===== 1. Legacy Azure OpenAI service =====
 
 service /llm/azureopenai on mockListener {
@@ -177,6 +184,18 @@ isolated function assertValidReasoningEffort(json effort) {
 // is spec-compliant; the `temperature = ()` usage documented on the provider simply leaves the default in place
 // on this path rather than removing the field.
 isolated function validateChatWireParams(string deploymentId, json payload) {
+    // `parallel_tool_calls` is only valid alongside `tools`; Azure rejects the request otherwise with
+    // "'parallel_tool_calls' is only allowed when 'tools' are specified". Pin that rule for every request that
+    // reaches the wire. (The generate() path supplies `tools` but pins `tool_choice` to a single named tool, so it
+    // legitimately omits the flag; the chat()-with-tools assertion in `respondToChatCompletion` covers that path.)
+    json|error toolsJson = payload.tools;
+    json|error parallelToolCalls = payload.parallel_tool_calls;
+    if parallelToolCalls is json {
+        test:assertTrue(toolsJson is json[] && toolsJson.length() > 0,
+                "Chat Completions: 'parallel_tool_calls' must never be sent without 'tools'");
+        test:assertEquals(parallelToolCalls, true,
+                "Chat Completions: this module only ever enables 'parallel_tool_calls'");
+    }
     json|error reasoningEffort = payload.reasoning_effort;
     if reasoningEffort is json {
         assertValidReasoningEffort(reasoningEffort);
@@ -275,6 +294,13 @@ isolated function respondToChatCompletion(string deploymentId, json payload) ret
     // chat() path: return a get_weather tool call when tools are present, otherwise a text response (or a
     // trigger-driven response for the edge-case coverage tests).
     if hasOtherTool {
+        // The chat() path must always opt into parallel tool calls, so a model is free to request several tools in
+        // one turn.
+        test:assertEquals(payload.parallel_tool_calls, true,
+                "Chat Completions: chat() with tools must enable 'parallel_tool_calls'");
+        if getUserMessageContent(messages).startsWith(TRIGGER_PARALLEL_TOOLS) {
+            return respondToParallelToolCalls(messages);
+        }
         return getChatCompletionToolCallResponse("get_weather", "{\"city\": \"London\"}");
     }
 
@@ -292,6 +318,76 @@ isolated function respondToChatCompletion(string deploymentId, json payload) ret
         return getChatCompletionToolCallResponse("get_weather", "this-is-not-json");
     }
     return getChatCompletionContentResponse(userContent);
+}
+
+// ===== Parallel (multiple) tool calls: Chat Completions surface =====
+
+// Drives the two-turn parallel tool call flow on the Chat Completions surface.
+//
+// Turn 1 (no `role: "tool"` messages in the request) returns TWO `getWeather` tool calls in a single assistant
+// message, which the provider must surface as two `ai:FunctionCall` entries.
+//
+// Turn 2 asserts that the provider reconstructed the history in the shape Azure requires for parallel tool calls:
+// the assistant turn must carry a `tool_calls` ARRAY (never the deprecated singular `function_call`), and each tool
+// result must be a separate `role: "tool"` message correlated by `tool_call_id`. Getting this wrong is what breaks
+// multi-tool agent loops, so the assertions are made here (on the wire) rather than in the test.
+isolated function respondToParallelToolCalls(json[] messages) returns json|error {
+    json[] toolResultMessages = from json message in messages
+        where message is map<json> && message["role"] == "tool"
+        select message;
+
+    if toolResultMessages.length() == 0 {
+        return getParallelToolCallsChatResponse();
+    }
+
+    // Locate the assistant turn that carries the tool calls.
+    map<json>? assistantMessage = ();
+    foreach json message in messages {
+        if message is map<json> && message["role"] == "assistant" {
+            assistantMessage = message;
+        }
+    }
+    if assistantMessage !is map<json> {
+        test:assertFail("Chat Completions (parallel tools): the assistant turn must be present in the history");
+    }
+
+    test:assertTrue(assistantMessage["function_call"] is (),
+            "Chat Completions (parallel tools): the deprecated singular 'function_call' field must not be used");
+    json? toolCallsInHistory = assistantMessage["tool_calls"];
+    test:assertTrue(toolCallsInHistory is json[],
+            "Chat Completions (parallel tools): the assistant message must carry a 'tool_calls' array");
+    json[] historyToolCalls = <json[]>toolCallsInHistory;
+    test:assertEquals(historyToolCalls.length(), 2,
+            "Chat Completions (parallel tools): both tool calls must be present in the history");
+
+    // Every reconstructed tool call must be a well-formed function tool call, and the ids must round-trip.
+    string[] historyCallIds = [];
+    foreach json toolCall in historyToolCalls {
+        map<json> tc = check toolCall.ensureType();
+        test:assertEquals(tc["type"], "function",
+                "Chat Completions (parallel tools): each tool call must be typed as 'function'");
+        map<json> fn = check tc["function"].ensureType();
+        test:assertEquals(fn["name"], "getWeather",
+                "Chat Completions (parallel tools): unexpected tool name in the history");
+        historyCallIds.push(tc["id"].toString());
+    }
+    test:assertEquals(historyCallIds, [PARIS_CALL_ID, TOKYO_CALL_ID],
+            "Chat Completions (parallel tools): the tool call ids must round-trip in order");
+
+    // One `role: "tool"` result per call, correlated by `tool_call_id` and in the same order.
+    test:assertEquals(toolResultMessages.length(), 2,
+            "Chat Completions (parallel tools): one 'tool' result message per call is required");
+    string[] resultCallIds = [];
+    foreach json toolResult in toolResultMessages {
+        map<json> tr = check toolResult.ensureType();
+        test:assertTrue(tr["content"] is string,
+                "Chat Completions (parallel tools): a tool result must carry string content");
+        resultCallIds.push(tr["tool_call_id"].toString());
+    }
+    test:assertEquals(resultCallIds, [PARIS_CALL_ID, TOKYO_CALL_ID],
+            "Chat Completions (parallel tools): each tool result must reference its originating tool call id");
+
+    return getParallelToolCallsFollowUpResponse();
 }
 
 // Asserts that a Chat Completions request body carries exactly the token-limit field appropriate for its
@@ -366,6 +462,12 @@ function handleResponsesApiRequest(json payload) returns json|error {
         return triggerResponse[0];
     }
 
+    // Parallel tool calls need the whole input item list (not just the first user message) to tell the first turn
+    // from the follow-up, so this is dispatched here rather than through `getResponsesTriggerResponse`.
+    if initialText.startsWith(TRIGGER_PARALLEL_TOOLS) {
+        return respondToParallelToolCallsViaResponses(inputItems);
+    }
+
     // Classify the provided tools.
     json|error toolsJson = payload.tools;
     boolean hasGetResultsTool = false;
@@ -399,6 +501,134 @@ function handleResponsesApiRequest(json payload) returns json|error {
 
     return getTestResponsesApiChatResponse(initialText);
 }
+
+// ===== Parallel (multiple) tool calls: Responses surface =====
+
+// Drives the two-turn parallel tool call flow on the Responses surface, mirroring `respondToParallelToolCalls`.
+//
+// Turn 1 (no `function_call_output` items in the input) returns TWO `function_call` output items.
+//
+// Turn 2 asserts the provider reconstructed the history as the Responses API requires: one flat `function_call`
+// input item per call and one `function_call_output` item per result, correlated by `call_id`. Note the Responses
+// wire shape differs from Chat Completions — there is no assistant `tool_calls` array and no `role: "tool"`
+// message — which is exactly why this surface needs its own coverage.
+isolated function respondToParallelToolCallsViaResponses(json[] inputItems) returns json|error {
+    string[] functionCallIds = [];
+    string[] functionOutputIds = [];
+    foreach json item in inputItems {
+        if item !is map<json> {
+            continue;
+        }
+        string itemType = item["type"].toString();
+        if itemType == "function_call" {
+            test:assertEquals(item["name"], PARALLEL_TOOL_NAME,
+                    "Responses API (parallel tools): unexpected tool name in the reconstructed history");
+            test:assertTrue(item["arguments"] is string,
+                    "Responses API (parallel tools): 'arguments' must be sent as a JSON string");
+            // The optional item `id` must be a server-assigned `fc_...` id; sending the `call_...` correlation id
+            // there makes Azure reject the turn, so the provider must omit it.
+            json? itemId = item["id"];
+            test:assertTrue(itemId is () || itemId.toString().startsWith("fc"),
+                    "Responses API (parallel tools): a function_call item 'id' must be omitted or an 'fc_...' id");
+            functionCallIds.push(item["call_id"].toString());
+        } else if itemType == "function_call_output" {
+            test:assertTrue(item["output"] is string,
+                    "Responses API (parallel tools): 'output' must be sent as a string");
+            functionOutputIds.push(item["call_id"].toString());
+        }
+    }
+
+    if functionOutputIds.length() == 0 {
+        return getParallelToolCallsResponsesResponse();
+    }
+
+    test:assertEquals(functionCallIds, [PARIS_CALL_ID, TOKYO_CALL_ID],
+            "Responses API (parallel tools): one 'function_call' item per call is required, in order");
+    test:assertEquals(functionOutputIds, [PARIS_CALL_ID, TOKYO_CALL_ID],
+            "Responses API (parallel tools): each 'function_call_output' must reference its originating call_id");
+    return getParallelToolCallsResponsesFollowUpResponse();
+}
+
+// Builds a Responses API response carrying TWO parallel `function_call` output items.
+isolated function getParallelToolCallsResponsesResponse() returns json => {
+    id: "resp_parallel_tool_calls",
+    'object: "response",
+    created_at: 1234567890,
+    model: "gpt-4o",
+    status: "completed",
+    'error: (),
+    incomplete_details: (),
+    instructions: (),
+    metadata: (),
+    tool_choice: "auto",
+    tools: [],
+    parallel_tool_calls: true,
+    output: [
+        {
+            id: "fc_paris",
+            'type: "function_call",
+            name: PARALLEL_TOOL_NAME,
+            arguments: "{\"city\": \"Paris\"}",
+            call_id: PARIS_CALL_ID,
+            status: "completed"
+        },
+        {
+            id: "fc_tokyo",
+            'type: "function_call",
+            name: PARALLEL_TOOL_NAME,
+            arguments: "{\"city\": \"Tokyo\"}",
+            call_id: TOKYO_CALL_ID,
+            status: "completed"
+        }
+    ],
+    output_text: "",
+    usage: {
+        input_tokens: 80,
+        output_tokens: 40,
+        total_tokens: 120,
+        input_tokens_details: {cached_tokens: 0},
+        output_tokens_details: {reasoning_tokens: 0}
+    }
+};
+
+// Builds the Responses API answer returned once both parallel tool results have been fed back.
+isolated function getParallelToolCallsResponsesFollowUpResponse() returns json => {
+    id: "resp_parallel_tool_calls_followup",
+    'object: "response",
+    created_at: 1234567890,
+    model: "gpt-4o",
+    status: "completed",
+    'error: (),
+    incomplete_details: (),
+    instructions: (),
+    metadata: (),
+    tool_choice: "auto",
+    tools: [],
+    parallel_tool_calls: true,
+    output: [
+        {
+            id: "msg_parallel_followup",
+            'type: "message",
+            role: "assistant",
+            status: "completed",
+            content: [
+                {
+                    'type: "output_text",
+                    text: PARALLEL_TOOLS_ANSWER,
+                    annotations: []
+                }
+            ]
+        }
+    ],
+    output_text: PARALLEL_TOOLS_ANSWER,
+    usage: {
+        input_tokens: 120,
+        output_tokens: 30,
+        total_tokens: 150,
+        input_tokens_details: {cached_tokens: 0},
+        output_tokens_details: {reasoning_tokens: 0}
+    }
+};
 
 // Maps an edge-case trigger prompt to a Responses API response that exercises a specific status/output branch.
 // Returns `()` for ordinary prompts (which are handled by the normal classification logic).
@@ -537,6 +767,74 @@ isolated function getChatCompletionToolCallResponse(string name, string argument
         prompt_tokens: 20,
         completion_tokens: 10,
         total_tokens: 30
+    }
+};
+
+// Builds a Chat Completions response carrying TWO parallel tool calls in a single assistant message. This is the
+// wire shape Azure returns when a model requests several tools at once.
+isolated function getParallelToolCallsChatResponse() returns json => {
+    id: "chat-parallel-tool-calls-id",
+    'object: "chat.completion",
+    created: 1234567890,
+    model: "gpt-4o",
+    choices: [
+        {
+            finish_reason: "tool_calls",
+            index: 0,
+            // Azure returns `logprobs: null` (present, null) when logprobs are not requested.
+            logprobs: (),
+            message: {
+                role: "assistant",
+                content: (),
+                tool_calls: [
+                    {
+                        id: PARIS_CALL_ID,
+                        'type: "function",
+                        'function: {
+                            name: PARALLEL_TOOL_NAME,
+                            arguments: "{\"city\": \"Paris\"}"
+                        }
+                    },
+                    {
+                        id: TOKYO_CALL_ID,
+                        'type: "function",
+                        'function: {
+                            name: PARALLEL_TOOL_NAME,
+                            arguments: "{\"city\": \"Tokyo\"}"
+                        }
+                    }
+                ]
+            }
+        }
+    ],
+    usage: {
+        prompt_tokens: 30,
+        completion_tokens: 20,
+        total_tokens: 50
+    }
+};
+
+// Builds the Chat Completions answer returned once both parallel tool results have been fed back.
+isolated function getParallelToolCallsFollowUpResponse() returns json => {
+    id: "chat-parallel-tool-calls-followup-id",
+    'object: "chat.completion",
+    created: 1234567890,
+    model: "gpt-4o",
+    choices: [
+        {
+            finish_reason: "stop",
+            index: 0,
+            logprobs: (),
+            message: {
+                role: "assistant",
+                content: PARALLEL_TOOLS_ANSWER
+            }
+        }
+    ],
+    usage: {
+        prompt_tokens: 60,
+        completion_tokens: 20,
+        total_tokens: 80
     }
 };
 

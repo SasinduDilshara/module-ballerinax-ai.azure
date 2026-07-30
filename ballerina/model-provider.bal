@@ -238,13 +238,10 @@ public isolated distinct client class OpenAiModelProvider {
             span.close(chatAssistantMessage);
             return error ai:LlmInvalidResponseError("Error while parsing the model response", chatAssistantMessage);
         }
-        if chatAssistantMessage.toolCalls is ai:FunctionCall[] {
-            span.close();
-            return chatAssistantMessage;
-        }
-
+        // The output messages must be recorded on both the text and the tool-call return paths before the span is
+        // closed. A parallel tool-call turn carries every call in `toolCalls` (and optionally text in `content`),
+        // so the single `addOutputMessages` call below covers both shapes.
         span.addOutputMessages(chatAssistantMessage);
-        span.addOutputType(observe:TEXT);
         span.close();
         return chatAssistantMessage;
     }
